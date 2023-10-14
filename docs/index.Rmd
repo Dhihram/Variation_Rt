@@ -1,0 +1,231 @@
+---
+title: "Rt Methods"
+author: "Dhihram Tenrisau"
+date: '2023-08-07'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+# Introduction
+
+Di sini akan ditunjukkan beberapa perhitungan Reproduksi Efektif atau (Rt) dengan beberapa package di R. seperti ```EpiEstim ```, ```EpiInvert```, ```R0```, dan ```EpiNow2```
+
+# Library
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(rio)
+library(openxlsx)
+library(EpiEstim)
+library(ggplot2)
+library(incidence)
+library(tidyr)
+library(readxl)
+library(lubridate)
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+library(MASS)
+library(EpiNow2)
+library(R0)
+library(EpiInvert)
+```
+
+# Membuka File
+
+Di metode ini, kita akan menggunakan file yang bersumber dari data COVID-19 di Kementerian Kesehatan Indonesia pada tanggal 23 Juni 2023.
+
+```{r}
+data_nas <- read_excel("C:/Users/dhihr/Downloads/230608_nasional_jb_njb.xlsx")
+data_olah_nasional <- filter(data_nas, Provinsi == "Indonesia")
+DT::datatable(data_nas)
+```
+
+# Epiestim
+
+## EDA
+
+```{r}
+Rt_Indonesia <- data.frame(I = data_olah_nasional$`Kasus Harian`, dates = data_olah_nasional$Tanggal, Provinsi = data_olah_nasional$Provinsi)
+Rt_Indonesia$I <- Rt_Indonesia$I %>% replace_na(0)
+Rt_Indonesia$dates <- as.Date(Rt_Indonesia$dates)
+DT::datatable(Rt_Indonesia)
+str(Rt_Indonesia)
+kasus_tanggal_Indonesia <- Rt_Indonesia[-c(1:7),]
+```
+
+## Utilizing 
+
+```{r}
+res_parametric_si_Indonesia <- estimate_R(Rt_Indonesia$I, 
+                                      method="parametric_si",
+                                      config = make_config(list(
+                                        mean_si = 3.5, 
+                                        std_si = 2.8))
+)
+plot(res_parametric_si_Indonesia)
+R_epiestim_Indonesia <- data.frame(tanggal = kasus_tanggal_Indonesia$dates, median_r = round(res_parametric_si_Indonesia$R$`Median(R)`,2),
+                               Provinsi = kasus_tanggal_Indonesia$Provinsi)
+
+```
+# EpiNow
+
+## EDA
+```{r}
+epinow1 <- data.frame(date = data_olah_nasional$Tanggal, confirm = data_olah_nasional$`Kasus Harian`)
+epinow_template <- tail(epinow1, n = 100)
+reported_cases <- epinow_template
+reported_cases$date <- as.Date(reported_cases$date, format='%Y-%m-%d')
+str(reported_cases)
+```
+
+```{r}
+reporting_delay <- estimate_delay(rlnorm(1000,  log(3), 1),
+                                  max_value = 15, bootstraps = 1)
+generation_time <- get_generation_time(disease = "SARS-CoV-2", source = "ganyani")
+incubation_period <- get_incubation_period(disease = "SARS-CoV-2", source = "lauer")
+estimates <- epinow(reported_cases = reported_cases, 
+                    generation_time = generation_time,
+                    delays = delay_opts(incubation_period, reporting_delay),
+                    rt = rt_opts(prior = list(mean = 2, sd = 0.2)),
+                    stan = stan_opts(cores = 4))
+knitr::kable(summary(estimates))
+head(summary(estimates, type = "parameters", params = "R"))
+head(summary(estimates, output = "estimated_reported_cases"))
+R_epinow1 <- summary(estimates, type = "parameters", params = "R")
+R_epinow2 <- summary(estimates, output = "estimated_reported_cases")
+R_epinow3 <- summary(estimates, type = "parameters", params = "infections")
+plot(estimates)
+```
+
+# TD Bettencourt & Ribiero
+
+## EDA
+
+```{r}
+data_kasus <- kasus_tanggal_Indonesia$I
+names(data_kasus) <- kasus_tanggal_Indonesia$dates
+data_kasus <- tail(data_kasus, 1000)
+tail(data_kasus)
+```
+
+## Utilizing
+
+```{r, warning=FALSE}
+mGT <- generation.time("gamma", c(3.5,2.8))
+SB <- est.R0.SB(data_kasus, begin=900, end=1000, mGT)
+SB$R
+plot(SB)
+SB$end
+SB$begin
+data_bettencourt <- tail(data_kasus,101)
+data_bettencourt <- as.data.frame(data_bettencourt)
+data_bettencourt$date <- row.names(data_bettencourt)
+data_bettencourt <- data_bettencourt %>% filter(row_number() <= n()-1)
+data_bettencourt$bettencourt <- SB$R
+```
+# TD Teunis & Wallinga
+
+## Utilizing
+
+```{r}
+TD <- est.R0.TD(data_kasus, mGT, begin=900, end=1000, nsim=80)
+plot(TD)
+J <- data.frame(R0 = TD$R)
+J$tanggal <- row.names(J)
+tail(J)
+J$tanggal <- as.Date(J$tanggal)
+```
+
+# EpiInvert
+
+## Utilizing
+
+```{r}
+kasus_tanggal_Indonesia$dates <- as.Date(kasus_tanggal_Indonesia$dates)
+EpiInvert <- EpiInvert(kasus_tanggal_Indonesia$I,
+                           "2023-06-25",kasus_tanggal_Indonesia$dates,
+                           select_params(list(mean_si = 3.5,sd_si=2.8, shift_si=-1)))
+EpiInvert_plot(EpiInvert)
+```
+
+
+# Gabung Seluruh Metode
+
+## EDA
+
+```{r}
+R_epinow <- data.frame(Date = as.Date(R_epinow1$date), Epinow = round(R_epinow1$median,2), treshold = 1)
+data_ends <- R_epinow %>% filter(Date == "2023-06-24")
+R_teunis <- data.frame(Date = as.Date(J$tanggal), Teunis = round(J$R0,2), treshold = 1)
+R_teunis <- R_teunis %>% filter(row_number() <= n()-1)
+data_ends2 <- R_teunis %>% filter(Date == "2023-06-24")
+R_epiestim <-data.frame(Date = as.Date(R_epiestim_Indonesia$tanggal), Epiestim = round(R_epiestim_Indonesia$median_r,2), treshold = 1)
+data_ends3 <- R_epiestim %>% filter(Date == "2023-06-24")
+R_bettencourt <- data.frame(Date = as.Date(data_bettencourt$date), bettencourt = data_bettencourt$bettencourt, treshold = 1)
+data_ends4 <- R_bettencourt %>% filter(Date == "2023-06-24")
+Rt_Alvarez <- data.frame(Date = as.Date(EpiInvert$dates), EpiInvert = round(EpiInvert$Rt,2), treshold = 1)
+data_ends5 <- Rt_Alvarez %>% filter(Date == "2023-06-24")
+```
+
+## Plot Gabung
+
+```{r, warning = FALSE}
+p <- ggplot() + geom_line(data = R_epinow, aes(x = Date, y = Epinow), size = 1.5, color = "turquoise4") +
+  geom_line(data = R_epinow, aes(x = Date, y = treshold), size = 0.5, color = "black", linetype = "dashed") +
+  theme(plot.title=element_text(size=16), panel.grid.minor = element_blank()) + theme(strip.text = element_text(face="bold", size=9)) + labs(title ="Rt Epinow") + ylab("Rt") + xlab("Tanggal") +
+  scale_x_date(date_breaks="1 week", date_labels="%d-%b", limits = as.Date(c("2023-05-20", "2023-06-24")))
+p + geom_text_repel(
+  aes(Date, Epinow, label = Epinow), data = data_ends,
+  fontface ="bold", color = "black", size = 4) + theme_minimal()
+
+p2 <- ggplot() + geom_line(data = R_teunis, aes(x = Date, y = Teunis), size = 1.5, color = "turquoise4") +
+  geom_line(data = R_teunis, aes(x = Date, y = treshold), size = 0.5, color = "black", linetype = "dashed") +
+  theme(plot.title=element_text(size=16), panel.grid.minor = element_blank()) + theme(strip.text = element_text(face="bold", size=9)) + labs(title ="Rt Wallinga & Teunis") + ylab("Rt") + xlab("Tanggal") +
+  scale_x_date(date_breaks="1 week", date_labels="%d-%b", limits = as.Date(c("2023-05-20", "2023-06-24")))
+p2 + geom_text_repel(
+  aes(Date, Teunis, label = Teunis), data = data_ends2,
+  fontface ="bold", color = "black", size = 4) + theme_minimal()
+
+p3 <- ggplot() + geom_line(data = R_epiestim, aes(x = Date, y = Epiestim), size = 1.5, color = "turquoise4") +
+  geom_line(data = R_epiestim, aes(x = Date, y = treshold), size = 0.5, color = "black", linetype = "dashed") +
+  theme(plot.title=element_text(size=16), panel.grid.minor = element_blank()) + theme(strip.text = element_text(face="bold", size=9)) + labs(title ="Rt Epiestim") + ylab("Rt") + xlab("Tanggal") +
+  scale_x_date(date_breaks="1 week", date_labels="%d-%b", limits = as.Date(c("2023-05-20", "2023-06-24")))
+p3 + geom_text_repel(
+  aes(Date, Epiestim, label = Epiestim), data = data_ends3,
+  fontface ="bold", color = "black", size = 4) + theme_minimal()
+
+p4 <- ggplot() + geom_line(data = R_bettencourt, aes(x = Date, y = bettencourt), size = 1.5, color = "turquoise4") +
+  geom_line(data = R_bettencourt, aes(x = Date, y = treshold), size = 0.5, color = "black", linetype = "dashed") +
+  theme(plot.title=element_text(size=16), panel.grid.minor = element_blank()) + theme(strip.text = element_text(face="bold", size=9)) + labs(title ="Rt Bettencourt & Ribiero") + ylab("Rt") + xlab("Tanggal") +
+  scale_x_date(date_breaks="1 week", date_labels="%d-%b", limits = as.Date(c("2023-05-20", "2023-06-24"))) + ylim(0.6,1.3)
+p4 + geom_text_repel(
+  aes(Date, bettencourt, label = bettencourt), data = data_ends4,
+  fontface ="bold", color = "black", size = 4) + theme_minimal()
+
+p5 <- ggplot() + geom_line(data = Rt_Alvarez, aes(x = Date, y = EpiInvert), size = 1.5, color = "turquoise4") +
+  geom_line(data = Rt_Alvarez, aes(x = Date, y = treshold), size = 0.5, color = "black", linetype = "dashed") +
+  theme(plot.title=element_text(size=16), panel.grid.minor = element_blank()) + theme(strip.text = element_text(face="bold", size=9)) + labs(title ="Rt Epilinvert") + ylab("Rt") + xlab("Tanggal") +
+  scale_x_date(date_breaks="1 week", date_labels="%d-%b", limits = as.Date(c("2023-05-20", "2023-06-24")))
+p5 + geom_text_repel(
+  aes(Date, EpiInvert, label = EpiInvert), data = data_ends5,
+  fontface ="bold", color = "black", size = 4) + theme_minimal()
+```
+
+# Referensi
+  
+1. Cori A (2021). _EpiEstim: Estimate Time Varying Reproduction Numbers from Epidemic Curves_. R package version
+   2.2-4, <https://CRAN.R-project.org/package=EpiEstim>.
+2. Sam Abbott, Joel Hellewell, Katharine Sherratt, Katelyn Gostic, Joe Hickson, Hamada S. Badr, Michael DeWitt, Robin
+   Thompson, EpiForecasts, Sebastian Funk (2020). _EpiNow2: Estimate Real-Time Case Counts and Time-Varying
+   Epidemiological Parameters_. doi:10.5281/zenodo.3957489 <https://doi.org/10.5281/zenodo.3957489>.
+3. Boelle P, Obadia T (2022). _R0: Estimation of R0 and Real-Time Reproduction Number from Epidemics_. R package
+   version 1.2-10, <https://CRAN.R-project.org/package=R0>.
+4. Alvarez L (2022). _EpiInvert: Variational Techniques in Epidemiology_. R package version 0.3.1,
+   <https://CRAN.R-project.org/package=EpiInvert>.
+
+  
+  
